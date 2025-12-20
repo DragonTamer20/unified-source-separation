@@ -16,8 +16,8 @@ from utils.config import yaml_to_parser
 RESAMPLE_RATE = 48000
 
 # parameters used to plot the spectrogram
-n_fft = 512
-hop_length = 128
+n_fft = 1024
+hop_length = 512
 config_path = "pretrained_models/tuss.medium.2-4src/hparams.yaml"
 ckpt_paths = [Path("pretrained_models/tuss.medium.2-4src/checkpoints/model.pth")]
 # instantiate the model
@@ -78,11 +78,80 @@ def plot_fig(data, save_path, title, fs):
     fig.colorbar(img, ax=ax, format="%+2.f dB")
     plt.subplots_adjust(left=0.125, right=0.95, top=0.88, bottom=0.11)
     plt.savefig(save_path)
+    # fig.savefig(save_path, dpi=70, bbox_inches="tight", pad_inches=0.02) 
     plt.close()
 
 
 MAX_OUTPUTS = 12
 
+def display_mix_spectrogram(audio_input):
+    if audio_input is None:
+        # clear the image (and any other dependent outputs)
+        return None
+    # load mix
+    mix, fs = torchaudio.load(audio_input)
+    scale = torch.max(torch.abs(mix)) / 0.95
+    mix /= scale
+    
+    # plot mix
+    mix_image_path = "tmp/mix.png"
+    plot_fig(mix[0], mix_image_path, "Input mixture", fs)
+    mix_image = gr.update(value=mix_image_path, visible=True)
+    return mix_image
+
+def display_source_spectrograms(
+    speech,
+    sfx,
+    sfxbg,
+    drums,
+    bass,
+    vocals,
+    other,
+    musicbg
+):
+    # convert checkboxes (True/False) to ints (1/0)
+    sfxbg, drums, bass, vocals, other, musicbg = \
+        map(int, [sfxbg, drums, bass, vocals, other, musicbg])
+
+    # build prompts list
+    prompt_names = ["speech", "sfx", "sfxbg", "drums", "bass", "vocals", "other", "musicbg"]
+    prompt_counts = [speech, sfx, sfxbg, drums, bass, vocals, other, musicbg]
+    prompts = [name for name, count in zip(prompt_names, prompt_counts) for _ in range(count)]
+
+    returns = []
+    num_outputs = len(prompts)
+
+    for i in range(MAX_OUTPUTS):
+        if i < num_outputs:
+            returns.append(gr.update(
+                value=f"tmp/{prompts[i]}{i}.png",
+                visible=True,
+                label=prompts[i]
+            ))
+        else:
+            returns.append(gr.update(visible=False))
+    print("done")
+    return returns
+
+
+def reset_demo():
+    # inputs (restore defaults)
+    speech = 0
+    sfx = 0
+    sfxbg = False
+    drums = False
+    bass = False
+    vocals = False
+    other = False
+    musicbg = False
+    return (
+        gr.update(value=None),
+        speech, sfx, sfxbg, drums, bass, vocals, other, musicbg,
+        gr.update(visible=False),
+        gr.update(visible=False),
+    ) + tuple(
+        gr.update(visible=False) for _ in range(MAX_OUTPUTS * 2)
+    )
 
 def separate_from_prompts(
     audio_input,
@@ -96,46 +165,29 @@ def separate_from_prompts(
     musicbg
 ):
     # convert checkboxes (True/False) to ints (1/0)
-    sfxbg = int(sfxbg)
-    drums = int(drums)
-    bass = int(bass)
-    vocals = int(vocals)
-    other = int(other)
-    musicbg = int(musicbg)
+    sfxbg, drums, bass, vocals, other, musicbg = \
+        map(int, [sfxbg, drums, bass, vocals, other, musicbg])
 
     # build prompts list
-    prompts = (
-        ["speech"] * speech +
-        ["sfx"] * sfx +
-        ["sfxbg"] * sfxbg +
-        ["drums"] * drums +
-        ["bass"] * bass +
-        ["vocals"] * vocals +
-        ["other"] * other +
-        ["musicbg"] * musicbg
-    )
+    prompt_names = ["speech", "sfx", "sfxbg", "drums", "bass", "vocals", "other", "musicbg"]
+    prompt_counts = [speech, sfx, sfxbg, drums, bass, vocals, other, musicbg]
+    prompts = [name for name, count in zip(prompt_names, prompt_counts) for _ in range(count)]
 
     # apply model
     sources = apply_model(audio_input, prompts)
 
+    # load mix for scaling
     mix, fs = torchaudio.load(audio_input)
-
     scale = torch.max(torch.abs(mix)) / 0.95
     mix /= scale
     sources /= scale
 
-    # plot mix
-    mix_image_path = "tmp/mix.png"
-    plot_fig(mix[0], mix_image_path, "Input mixture", fs)
-    mix_image = gr.update(value=mix_image_path, visible=True)
-
-    # save sources
+    # save sources and spectrograms
     for i, (src, p) in enumerate(zip(sources, prompts)):
         torchaudio.save(f"tmp/{p}{i}.wav", src[None], fs)
         plot_fig(src, f"tmp/{p}{i}.png", p, fs)
-        # plot_fig(src, mix_image_path, p)
 
-    # prepare outputs
+    # prepare audio outputs
     returns = []
     num_outputs = len(prompts)
 
@@ -146,29 +198,28 @@ def separate_from_prompts(
                 visible=True,
                 label=prompts[i]
             ))
-            returns.append(gr.update(
-                value=f"tmp/{prompts[i]}{i}.png",
-                visible=True,
-                label=prompts[i]
-            ))
         else:
             returns.append(gr.update(visible=False))
-            returns.append(gr.update(visible=False))
-
-    return returns + [mix_image] + [gr.update(visible=True)]
+    # add the markdown output visibility update
+    return returns + [gr.update(visible=True)]
 
 
 with gr.Blocks() as demo:
 
     gr.Markdown("## Upload a sound file")
+    with gr.Row():
+        audio_input = gr.Audio(
+            sources=["upload"],
+            type="filepath",
+            label="Upload Audio"
+        )
+        mix_image = gr.Image(label="Mix Spectrogram", visible=False)
 
-    audio_input = gr.Audio(
-        sources=["upload"],
-        type="filepath",
-        label="Upload Audio"
+    audio_input.change(
+        fn=display_mix_spectrogram,
+        inputs=audio_input,
+        outputs=mix_image,
     )
-
-    mix_image = gr.Image(label="Mix Spectrogram", visible=False)
 
     gr.Markdown("## Audio Mix Controls")
 
@@ -184,36 +235,45 @@ with gr.Blocks() as demo:
         vocals = gr.Checkbox(label="Vocals")
         other = gr.Checkbox(label="Other")
 
-    apply_btn = gr.Button("Apply", variant="primary")
+    with gr.Row():
+        apply_btn = gr.Button("Apply", variant="primary")
+        reset_btn = gr.Button("Reset")
 
     outputs_md = gr.Markdown("## Separated Outputs", visible=False)
 
-    output_components = []
+    # output_components = []
+    output_audio_components = []
+    output_image_components = []
 
     for i in range(MAX_OUTPUTS):
         with gr.Row():
             audio = gr.Audio(label=f"Output {i+1}", visible=False)
             image = gr.Image(label=f"Image {i+1}", visible=False)
-        output_components.extend([audio, image])
+        output_audio_components.append(audio)
+        output_image_components.append(image)
 
     apply_btn.click(
         separate_from_prompts,
-        inputs=[
-            audio_input,
-            speech,
-            sfx,
-            sfxbg,
-            drums,
-            bass,
-            vocals,
-            other,
-            musicbg
-        ],
-        outputs=output_components + [mix_image] + [outputs_md]
+        inputs=[audio_input, 
+                speech, sfx, sfxbg, drums, bass, vocals, other, musicbg],
+        outputs=output_audio_components + [outputs_md]
     ).then(
-        lambda: gr.update(interactive=True),
-        None,
-        apply_btn
+        display_source_spectrograms,
+        inputs=[speech, sfx, sfxbg, drums, bass, vocals, other, musicbg],
+        outputs=output_image_components
+    )
+    # .then(
+    #     lambda: gr.update(interactive=True),
+    #     None,
+    #     apply_btn
+    # )
+    reset_btn.click(
+        reset_demo,
+        outputs=[
+            audio_input, 
+            speech, sfx, sfxbg, drums, bass, vocals, other, musicbg,
+            mix_image, outputs_md] \
+            + output_audio_components + output_image_components
     )
 
 demo.launch()
